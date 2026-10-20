@@ -61,7 +61,74 @@ size_t nr_free_pages(void) {
     return pmm_manager->nr_free_pages();
 }
 
-//lab2 function1 YOUR CODE
+// Detect RAM, reserve boot-time allocations, then publish only whole free pages.
+static void page_init(void) {
+    uint64_t mem_base = get_memory_base();
+    uint64_t mem_size = get_memory_size();
+    // A failed DTB parse leaves zeroes. Check addition before forming mem_end.
+    if (mem_base == 0 || mem_size == 0 ||
+        mem_size > ~(uint64_t)0 - mem_base) {
+        panic("invalid physical memory information from DTB");
+    }
+    uint64_t mem_end = mem_base + mem_size;  // exclusive physical end
+    // This framework boots its kernel at a fixed physical address.
+    if (mem_base > KERNEL_BEGIN_PADDR || mem_end <= KERNEL_BEGIN_PADDR) {
+        panic("DTB memory does not contain the kernel");
+    }
+
+    cprintf("physical memory map from DTB:\n");
+    cprintf("  [0x%016lx, 0x%016lx), size 0x%016lx bytes\n",
+            mem_base, mem_end, mem_size);
+
+    uintptr_t maxpa = mem_end;
+    // PHYSICAL_MEMORY_END is this framework's physical management limit.
+    if (maxpa > PHYSICAL_MEMORY_END) {
+        maxpa = PHYSICAL_MEMORY_END;
+    }
+    maxpa = ROUNDDOWN(maxpa, PGSIZE);
+    if (maxpa <= KERNEL_BEGIN_PADDR) {
+        panic("no complete managed physical pages for the kernel");
+    }
+
+    // entry.S fixes this direct mapping. Preserve a correct earlier value;
+    // initialize a missing value or repair an inconsistent nonzero value.
+    if (va_pa_offset != PHYSICAL_MEMORY_OFFSET) {
+        va_pa_offset = PHYSICAL_MEMORY_OFFSET;
+    }
+    extern char end[];
+    uintptr_t kernel_end_pa = PADDR((uintptr_t)end);
+    if (kernel_end_pa < KERNEL_BEGIN_PADDR || kernel_end_pa > maxpa) {
+        panic("kernel image is outside managed physical memory");
+    }
+
+    // npage is an exclusive *physical page number*, as required by pa2page().
+    // pages[0] describes nbase, so the array has npage - nbase entries.
+    size_t managed_npage = maxpa / PGSIZE;
+    size_t descriptor_count = managed_npage - nbase;
+    size_t descriptor_bytes = descriptor_count * sizeof(struct Page);
+    uintptr_t descriptor_va = ROUNDUP((uintptr_t)end, PGSIZE);
+    uintptr_t descriptor_pa = PADDR(descriptor_va);
+    // Validate the entire array before touching memory beyond the kernel.
+    if (descriptor_pa > maxpa || descriptor_bytes > maxpa - descriptor_pa) {
+        panic("not enough physical memory for Page descriptors");
+    }
+
+    npage = managed_npage;
+    pages = (struct Page *)descriptor_va;
+    memset(pages, 0, descriptor_bytes);
+    for (size_t i = 0; i < descriptor_count; i++) {
+        SetPageReserved(pages + i);
+    }
+
+    // Reserve [DRAM_BASE, KERNEL_BEGIN_PADDR) for OpenSBI, the kernel image
+    // through kernel_end_pa, alignment padding, and the descriptor array.
+    // RAM below DRAM_BASE is outside this framework's descriptor indexing;
+    // any descriptors below mem_base remain reserved and are never released.
+    uintptr_t freemem = ROUNDUP(descriptor_pa + descriptor_bytes, PGSIZE);
+    if (freemem < maxpa) {
+        init_memmap(pa2page(freemem), (maxpa - freemem) / PGSIZE);
+    }
+}
 
 /* pmm_init - initialize the physical memory management */
 void pmm_init(void) {
