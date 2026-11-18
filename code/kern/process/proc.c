@@ -345,7 +345,7 @@ proc_init(void)
     /* idleproc is counted separately from proc_list and hash_list. */
     nr_process = 1;
 
-    int pid = kernel_thread(init_main, "2413777", 0);
+    int pid = kernel_thread(init_main, "Hello world!!", 0);
     if (pid <= 0)
     {
         panic("create initproc failed: %d.\n", pid);
@@ -356,4 +356,60 @@ proc_init(void)
 }
 
 
-//LAB4 function3 YOUR CODE
+//LAB4 function3 2414010
+
+// cpu_idle - the body of the idle thread (idleproc, pid == 0).
+// It never returns.  While some process is asking for a reschedule, hand the
+// CPU over; otherwise sleep in 'wfi' so that the hart stays idle until the
+// next interrupt instead of burning cycles in a busy loop.
+void
+cpu_idle(void)
+{
+    while (1)
+    {
+        if (current->need_resched)
+        {
+            schedule();
+        }
+        else
+        {
+            asm volatile("wfi");
+        }
+    }
+}
+
+// proc_run - switch the CPU from the current process to "proc".
+// NOTE: "proc" must be runnable, and the caller must not hold any lock that
+//       the target process may need after it resumes.
+void
+proc_run(struct proc_struct *proc)
+{
+    if (proc == current)
+    {
+        return;
+    }
+
+    bool intr_flag;
+    struct proc_struct *prev = current;
+
+    // current, the page table and the switching of the execution context must
+    // be updated as one atomic step, otherwise a timer interrupt could
+    // observe a half-switched state and reschedule from a corrupted context.
+    local_intr_save(intr_flag);
+    {
+        current = proc;
+        proc->runs++;
+
+        // switch to the Sv39 page table of "proc"; pgdir is a physical
+        // address, and satp holds "mode | (pgdir >> 12)".
+        write_csr(satp, (uintptr_t)SATP_MODE_SV39 << 60 |
+                            (proc->pgdir >> RISCV_PGSHIFT));
+        // writing satp does not guarantee that stale TLB entries are gone
+        flush_tlb();
+
+        // save the context of "prev" and resume "proc"; for a brand-new
+        // thread ra is forkret, see copy_thread.
+        switch_to(&prev->context, &proc->context);
+    }
+    local_intr_restore(intr_flag);
+}
